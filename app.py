@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,6 +16,8 @@ DATA_PATH = APP_DIR / "data" / "student_support_dummy_summary_30students_202604.
 ID_COL = "児童ID"
 GRADE_COL = "学年"
 CLASS_COL = "クラス"
+INTERNAL_GRADE_COL = "_grade"
+INTERNAL_CLASS_COL = "_class"
 RAW_COLUMNS = [
     "学年",
     "クラス",
@@ -61,10 +64,18 @@ st.set_page_config(
 def load_data() -> pd.DataFrame:
     """Load the bundled dummy data. No upload feature is intentionally provided."""
     df = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+    df.columns = df.columns.str.replace("\ufeff", "", regex=False).str.strip()
+    if GRADE_COL not in df.columns:
+        df.insert(0, GRADE_COL, "5年")
+    if CLASS_COL not in df.columns:
+        df.insert(1, CLASS_COL, "1組")
     missing = [c for c in RAW_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"必要なカラムが不足しています: {missing}")
-    return df[RAW_COLUMNS].copy()
+    out = df[RAW_COLUMNS].copy()
+    out[INTERNAL_GRADE_COL] = out[GRADE_COL].astype(str)
+    out[INTERNAL_CLASS_COL] = out[CLASS_COL].astype(str)
+    return out
 
 
 def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -98,7 +109,11 @@ def build_risk_matrix(
     comparison_basis: str,
 ) -> pd.DataFrame:
     matrix = pd.DataFrame(index=df.index)
-    group_cols = [GRADE_COL, CLASS_COL] if comparison_basis == "クラス内比較" else [GRADE_COL]
+    group_cols = (
+        [INTERNAL_GRADE_COL, INTERNAL_CLASS_COL]
+        if comparison_basis == "クラス内比較"
+        else [INTERNAL_GRADE_COL]
+    )
     for feature in selected_features:
         normalized = df.groupby(group_cols, dropna=False)[feature].transform(minmax_to_100)
         if directions.get(feature) == "低いほど気になる":
