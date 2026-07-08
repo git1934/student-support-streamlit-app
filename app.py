@@ -13,7 +13,11 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_PATH = APP_DIR / "data" / "student_support_dummy_summary_30students_202604.csv"
 
 ID_COL = "児童ID"
+GRADE_COL = "学年"
+CLASS_COL = "クラス"
 RAW_COLUMNS = [
+    "学年",
+    "クラス",
     "児童ID",
     "病気欠席数",
     "事故欠席数",
@@ -91,10 +95,12 @@ def build_risk_matrix(
     df: pd.DataFrame,
     selected_features: List[str],
     directions: Dict[str, str],
+    comparison_basis: str,
 ) -> pd.DataFrame:
     matrix = pd.DataFrame(index=df.index)
+    group_cols = [GRADE_COL, CLASS_COL] if comparison_basis == "クラス内比較" else [GRADE_COL]
     for feature in selected_features:
-        normalized = minmax_to_100(df[feature])
+        normalized = df.groupby(group_cols, dropna=False)[feature].transform(minmax_to_100)
         if directions.get(feature) == "低いほど気になる":
             normalized = 100 - normalized
         matrix[feature] = normalized.clip(0, 100)
@@ -200,7 +206,11 @@ raw_df = load_data()
 df = add_derived_features(raw_df)
 
 st.title("要サポート児童ラベル付け")
-st.caption("2026年4月1日〜4月30日、1クラス30名のテストデータを内蔵しています。")
+st.caption("2026年4月1日〜4月30日、5年3クラス90名のテストデータを内蔵しています。")
+st.info(
+    "サポート必要度スコアは、選択したカラムを比較基準ごとに0〜100へ換算し、整数重みを反映して集約した確認用の目安です。"
+    "比較基準を変更すると、同じ児童でもスコアやラベルが変わることがあります。"
+)
 
 with st.expander("このアプリで行うこと", expanded=False):
     st.markdown(
@@ -222,7 +232,7 @@ main_output = st.sidebar.radio(
 )
 
 threshold_low_mid, threshold_mid_high = st.sidebar.slider(
-    "低／中／高の境界",
+    "低・中・高に分けるスコア基準",
     min_value=0,
     max_value=100,
     value=(35, 70),
@@ -238,9 +248,16 @@ flag_threshold = st.sidebar.slider(
     help="この値以上の児童を 1：要サポート候補 とします。",
 )
 
+st.sidebar.header("比較基準")
+comparison_basis = st.sidebar.radio(
+    "比較基準",
+    ["クラス内比較", "同学年内比較"],
+    index=0,
+)
+
 st.sidebar.header("予測に使うカラム")
 selected_features = st.sidebar.multiselect(
-    "予測に使うカラム",
+    "予測に使うカラムを選択",
     options=numeric_features,
     default=[c for c in DEFAULT_FEATURES if c in numeric_features],
     help="忌引等数・出席停止数は初期設定では外していますが、必要に応じて追加できます。",
@@ -281,7 +298,7 @@ for feature in selected_features:
             help="0=スコアに反映しない、1=標準、2〜5=重視",
         )
 
-risk_matrix = build_risk_matrix(df, selected_features, directions)
+risk_matrix = build_risk_matrix(df, selected_features, directions, comparison_basis)
 score = calculate_score(risk_matrix, weights)
 three_label = label_three_levels(score, threshold_low_mid, threshold_mid_high)
 binary_flag = flag_binary(score, flag_threshold)
@@ -342,8 +359,48 @@ with summary_tab:
         fig_hist.update_layout(yaxis_title="人数", xaxis_title="スコア")
         st.plotly_chart(fig_hist, use_container_width=True)
 
+    st.subheader("クラス別のラベル分布")
+    class_counts = (
+        result_df.groupby([GRADE_COL, CLASS_COL, main_label_col], dropna=False)
+        .size()
+        .reset_index(name="人数")
+    )
+    class_counts["学年・クラス"] = class_counts[GRADE_COL].astype(str) + class_counts[CLASS_COL].astype(str)
+    class_fig = px.bar(
+        class_counts,
+        x="学年・クラス",
+        y="人数",
+        color=main_label_col,
+        text="人数",
+        category_orders={main_label_col: main_order},
+        color_discrete_map=LABEL_COLORS,
+        title="クラス別ラベル分布",
+    )
+    class_fig.update_layout(barmode="stack", xaxis_title="", yaxis_title="人数")
+    st.plotly_chart(class_fig, use_container_width=True)
+    class_table = (
+        class_counts.pivot_table(
+            index=["学年", "クラス"],
+            columns=main_label_col,
+            values="人数",
+            fill_value=0,
+            aggfunc="sum",
+        )
+        .reindex(columns=main_order, fill_value=0)
+        .reset_index()
+    )
+    st.dataframe(class_table, use_container_width=True, hide_index=True)
+
     st.subheader("サポート優先一覧")
-    priority_cols = [ID_COL, "サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ表示", "主な要因"]
+    priority_cols = [
+        GRADE_COL,
+        CLASS_COL,
+        ID_COL,
+        "サポート必要度スコア",
+        "サポート必要度ラベル",
+        "0/1フラグ",
+        "主な要因",
+    ]
     priority_df = result_df.sort_values("サポート必要度スコア", ascending=False)[priority_cols].head(10)
     display_result_table(priority_df)
 
@@ -355,8 +412,16 @@ with result_tab:
     if selected_filter != "すべて":
         table_df = table_df[table_df[main_label_col] == selected_filter]
 
-    base_cols = [ID_COL, "サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ表示", "主な要因"]
-    display_cols = base_cols + [c for c in RAW_COLUMNS if c != ID_COL] + [
+    base_cols = [
+        GRADE_COL,
+        CLASS_COL,
+        ID_COL,
+        "サポート必要度スコア",
+        "サポート必要度ラベル",
+        "0/1フラグ",
+        "主な要因",
+    ]
+    display_cols = base_cols + [c for c in RAW_COLUMNS if c not in base_cols] + [
         "心の天気晴れ率",
         "心の天気曇り率",
         "心の天気雨率",
@@ -385,6 +450,6 @@ with settings_tab:
 | 心の天気晴れ率 | 低いほど気になる |
 | 忌引等数・出席停止数 | 初期設定では使用しない候補 |
 
-サポート必要度スコアは、各変数を0〜100点に正規化し、向きの反転と整数の重み付けを行ったうえで平均した値です。重み0の変数はスコアに反映されません。
+サポート必要度スコアは、各変数を比較基準ごとに0〜100点へ正規化し、向きの反転と整数の重み付けを行ったうえで平均した値です。重み0の変数はスコアに反映されません。
         """
     )
