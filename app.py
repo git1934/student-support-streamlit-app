@@ -298,11 +298,11 @@ result_df.insert(5, "主な要因", main_factors)
 main_label_col = "サポート必要度ラベル" if main_output == "低／中／高ラベル" else "0/1フラグ"
 main_order = LABEL_ORDER_3 if main_label_col == "サポート必要度ラベル" else FLAG_ORDER
 
-summary_tab, result_tab, detail_tab, data_tab = st.tabs([
+summary_tab, result_tab, data_tab, settings_tab = st.tabs([
     "結果サマリー",
     "児童一覧",
-    "児童詳細",
-    "データ確認",
+    "元データ",
+    "初期設定",
 ])
 
 with summary_tab:
@@ -368,60 +368,6 @@ with result_tab:
 
     display_result_table(table_df.sort_values("サポート必要度スコア", ascending=False)[display_cols])
 
-with detail_tab:
-    st.subheader("児童別のスコア内訳")
-    selected_student = st.selectbox(
-        "児童IDを選択",
-        result_df.sort_values("サポート必要度スコア", ascending=False)[ID_COL].tolist(),
-    )
-    student_row = result_df[result_df[ID_COL] == selected_student].iloc[0]
-    student_idx = student_row.name
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("サポート必要度スコア", f"{student_row['サポート必要度スコア']:.1f}")
-    c2.markdown("**低／中／高ラベル**  ")
-    c2.markdown(label_badge(str(student_row["サポート必要度ラベル"])), unsafe_allow_html=True)
-    c3.markdown("**0/1フラグ**  ")
-    c3.markdown(label_badge(str(student_row["0/1フラグ"])), unsafe_allow_html=True)
-
-    contribution = pd.DataFrame({
-        "変数": selected_features,
-        "元の値": [student_row[f] for f in selected_features],
-        "向き": [directions[f] for f in selected_features],
-        "重み": [weights[f] for f in selected_features],
-        "リスク換算点": [risk_matrix.loc[student_idx, f] for f in selected_features],
-    })
-    total_weight = sum(max(weights[f], 0) for f in selected_features)
-    if np.isclose(total_weight, 0):
-        total_weight = len(selected_features)
-    contribution["スコア寄与"] = contribution.apply(
-        lambda r: r["リスク換算点"] * max(float(r["重み"]), 0) / total_weight,
-        axis=1,
-    ).round(1)
-    contribution = contribution.sort_values("スコア寄与", ascending=False)
-
-    fig_contrib = px.bar(
-        contribution,
-        x="スコア寄与",
-        y="変数",
-        orientation="h",
-        hover_data=["元の値", "向き", "重み", "リスク換算点"],
-        title=f"{selected_student} のスコア寄与",
-    )
-    fig_contrib.update_layout(yaxis={"categoryorder": "total ascending"}, xaxis_title="スコア寄与", yaxis_title="")
-    st.plotly_chart(fig_contrib, use_container_width=True)
-
-    st.markdown("**元データ・派生値**")
-    raw_view_cols = [c for c in RAW_COLUMNS if c != ID_COL] + [
-        "心の天気晴れ率",
-        "心の天気曇り率",
-        "心の天気雨率",
-        "欠席合計（病気＋事故）",
-        "遅刻早退合計",
-    ]
-    raw_view = student_row[raw_view_cols].to_frame("値")
-    st.dataframe(raw_view, use_container_width=True)
-
 with data_tab:
     st.subheader("搭載データ")
     st.dataframe(raw_df, use_container_width=True, hide_index=True)
@@ -429,6 +375,7 @@ with data_tab:
     st.subheader("変数の概要")
     st.dataframe(summarize_numeric(df), use_container_width=True, hide_index=True)
 
+with settings_tab:
     st.subheader("初期設定の考え方")
     st.markdown(
         """
