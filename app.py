@@ -75,7 +75,6 @@ def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
 
     out["欠席合計（病気＋事故）"] = out["病気欠席数"] + out["事故欠席数"]
     out["遅刻早退合計"] = out["遅刻数"] + out["早退数"]
-    out["除外候補合計（忌引等＋出席停止）"] = out["忌引等数"] + out["出席停止数"]
     return out
 
 
