@@ -47,7 +47,7 @@ LABEL_COLORS = {"低": "#2E7D32", "中": "#ED6C02", "高": "#C62828", "0": "#2E7
 
 
 st.set_page_config(
-    page_title="児童サポート必要度ラベリング デモ",
+    page_title="要サポート児童ラベル付け",
     page_icon="🏫",
     layout="wide",
 )
@@ -200,11 +200,8 @@ def label_badge(label: str) -> str:
 raw_df = load_data()
 df = add_derived_features(raw_df)
 
-st.title("児童サポート必要度ラベリング デモ")
-st.caption(
-    "2026年4月1日〜4月30日、1クラス30名のテストデータを内蔵したStreamlitサンプルです。"
-    "CSVアップロード・CSV出力はありません。"
-)
+st.title("要サポート児童ラベル付け")
+st.caption("2026年4月1日〜4月30日、1クラス30名のテストデータを内蔵しています。")
 
 with st.expander("このアプリで行うこと", expanded=False):
     st.markdown(
@@ -427,7 +424,6 @@ with detail_tab:
 
 with data_tab:
     st.subheader("搭載データ")
-    st.caption("このアプリは内蔵CSVのみを使用します。アップロード機能はありません。")
     st.dataframe(raw_df, use_container_width=True, hide_index=True)
 
     st.subheader("変数の概要")
