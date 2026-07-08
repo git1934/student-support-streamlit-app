@@ -13,7 +13,7 @@ cd C:\Users\DDB\Downloads\student_support_streamlit_app_fixed\student_support_st
 ### 2. 既存ライブラリを入れ直す
 
 ```bat
-python -m pip uninstall -y numpy pandas pyarrow scipy scikit-learn streamlit plotly
+python -m pip uninstall -y numpy pandas pyarrow streamlit plotly
 python -m pip install --no-cache-dir --force-reinstall -r requirements.txt
 ```
 

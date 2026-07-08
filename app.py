@@ -8,13 +8,6 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-try:
-    from sklearn.decomposition import PCA
-    SKLEARN_AVAILABLE = True
-except Exception:
-    PCA = None
-    SKLEARN_AVAILABLE = False
-
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_PATH = APP_DIR / "data" / "student_support_dummy_summary_30students_202604.csv"
@@ -146,15 +139,40 @@ def summarize_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return summary[["変数", "件数", "欠損数", "平均", "最小", "最大"]]
 
 
-def pca_coordinates(risk_matrix: pd.DataFrame) -> pd.DataFrame | None:
-    if not SKLEARN_AVAILABLE or risk_matrix.shape[1] < 2 or risk_matrix.shape[0] < 2:
-        return None
-    try:
-        pca = PCA(n_components=2, random_state=42)
-        coords = pca.fit_transform(risk_matrix.fillna(0).to_numpy(dtype=float))
-        return pd.DataFrame({"PCA1": coords[:, 0], "PCA2": coords[:, 1]}, index=risk_matrix.index)
-    except Exception:
-        return None
+def summarize_main_factors(
+    risk_matrix: pd.DataFrame,
+    weights: Dict[str, int],
+    top_n: int = 3,
+) -> pd.Series:
+    if risk_matrix.empty:
+        return pd.Series([""] * len(risk_matrix), index=risk_matrix.index)
+
+    positive_weights = {feature: max(int(weights.get(feature, 0)), 0) for feature in risk_matrix.columns}
+    if sum(positive_weights.values()) == 0:
+        positive_weights = {feature: 1 for feature in risk_matrix.columns}
+
+    def row_factors(row: pd.Series) -> str:
+        contributions = [
+            (feature, float(row[feature]) * positive_weights[feature])
+            for feature in risk_matrix.columns
+            if positive_weights[feature] > 0
+        ]
+        contributions = sorted(contributions, key=lambda item: item[1], reverse=True)
+        main_features = [feature for feature, value in contributions if value > 0][:top_n]
+        return "、".join(main_features) if main_features else "該当なし"
+
+    return risk_matrix.apply(row_factors, axis=1)
+
+
+def display_result_table(table_df: pd.DataFrame) -> None:
+    st.dataframe(
+        table_df,
+        column_config={
+            "サポート必要度スコア": st.column_config.NumberColumn(format="%.1f"),
+        },
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def label_badge(label: str) -> str:
@@ -202,7 +220,7 @@ numeric_features = [c for c in df.select_dtypes(include=[np.number]).columns if 
 
 st.sidebar.header("ラベル設定")
 main_output = st.sidebar.radio(
-    "メイン表示",
+    "分類手法",
     ["低／中／高ラベル", "0/1フラグ"],
     index=0,
 )
@@ -224,16 +242,16 @@ flag_threshold = st.sidebar.slider(
     help="この値以上の児童を 1：要サポート候補 とします。",
 )
 
-st.sidebar.header("使用変数")
+st.sidebar.header("予測に使うカラム")
 selected_features = st.sidebar.multiselect(
-    "スコアに使う変数",
+    "予測に使うカラム",
     options=numeric_features,
     default=[c for c in DEFAULT_FEATURES if c in numeric_features],
     help="忌引等数・出席停止数は初期設定では外していますが、必要に応じて追加できます。",
 )
 
 if not selected_features:
-    st.warning("スコアに使う変数を1つ以上選択してください。")
+    st.warning("予測に使うカラムを1つ以上選択してください。")
     st.stop()
 
 st.sidebar.header("向き・重み")
@@ -271,12 +289,14 @@ risk_matrix = build_risk_matrix(df, selected_features, directions)
 score = calculate_score(risk_matrix, weights)
 three_label = label_three_levels(score, threshold_low_mid, threshold_mid_high)
 binary_flag = flag_binary(score, flag_threshold)
+main_factors = summarize_main_factors(risk_matrix, weights)
 
 result_df = df.copy()
 result_df.insert(1, "サポート必要度スコア", score)
 result_df.insert(2, "サポート必要度ラベル", three_label)
 result_df.insert(3, "0/1フラグ", binary_flag)
 result_df.insert(4, "0/1フラグ表示", result_df["0/1フラグ"].map({"0": "0：通常", "1": "1：要サポート候補"}))
+result_df.insert(5, "主な要因", main_factors)
 
 main_label_col = "サポート必要度ラベル" if main_output == "低／中／高ラベル" else "0/1フラグ"
 main_order = LABEL_ORDER_3 if main_label_col == "サポート必要度ラベル" else FLAG_ORDER
@@ -326,39 +346,10 @@ with summary_tab:
         fig_hist.update_layout(yaxis_title="人数", xaxis_title="スコア")
         st.plotly_chart(fig_hist, use_container_width=True)
 
-    st.subheader("選択変数の2次元マップ")
-    coords = pca_coordinates(risk_matrix)
-    if coords is not None:
-        pca_df = pd.concat([result_df[[ID_COL, "サポート必要度スコア", main_label_col]], coords], axis=1)
-        fig_pca = px.scatter(
-            pca_df,
-            x="PCA1",
-            y="PCA2",
-            color=main_label_col,
-            size="サポート必要度スコア",
-            hover_data=[ID_COL, "サポート必要度スコア"],
-            category_orders={main_label_col: main_order},
-            color_discrete_map=LABEL_COLORS,
-            title="PCAによる参考可視化（ラベル判定にはスコアを使用）",
-        )
-        st.plotly_chart(fig_pca, use_container_width=True)
-    else:
-        fig_score = px.scatter(
-            result_df,
-            x="サポート必要度スコア",
-            y=ID_COL,
-            color=main_label_col,
-            hover_data=[ID_COL, "サポート必要度スコア"],
-            category_orders={main_label_col: main_order},
-            color_discrete_map=LABEL_COLORS,
-            title="スコア順の児童分布",
-        )
-        st.plotly_chart(fig_score, use_container_width=True)
-
-    st.info(
-        "PCAマップは、選択した複数変数を2次元に圧縮して見やすくするための参考表示です。"
-        "低／中／高や0/1の判定は、左メニューで設定した重み付きスコアと閾値から作成しています。"
-    )
+    st.subheader("サポート優先一覧")
+    priority_cols = [ID_COL, "サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ表示", "主な要因"]
+    priority_df = result_df.sort_values("サポート必要度スコア", ascending=False)[priority_cols].head(10)
+    display_result_table(priority_df)
 
 with result_tab:
     st.subheader("児童ごとのラベル")
@@ -368,7 +359,7 @@ with result_tab:
     if selected_filter != "すべて":
         table_df = table_df[table_df[main_label_col] == selected_filter]
 
-    base_cols = [ID_COL, "サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ表示"]
+    base_cols = [ID_COL, "サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ表示", "主な要因"]
     display_cols = base_cols + [c for c in RAW_COLUMNS if c != ID_COL] + [
         "心の天気晴れ率",
         "心の天気曇り率",
@@ -378,11 +369,7 @@ with result_tab:
     ]
     display_cols = [c for c in display_cols if c in table_df.columns]
 
-    st.dataframe(
-        table_df.sort_values("サポート必要度スコア", ascending=False)[display_cols],
-        use_container_width=True,
-        hide_index=True,
-    )
+    display_result_table(table_df.sort_values("サポート必要度スコア", ascending=False)[display_cols])
 
 with detail_tab:
     st.subheader("児童別のスコア内訳")
