@@ -1,0 +1,461 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+try:
+    from sklearn.decomposition import PCA
+    SKLEARN_AVAILABLE = True
+except Exception:
+    PCA = None
+    SKLEARN_AVAILABLE = False
+
+
+APP_DIR = Path(__file__).resolve().parent
+DATA_PATH = APP_DIR / "data" / "student_support_dummy_summary_30students_202604.csv"
+
+ID_COL = "児童ID"
+RAW_COLUMNS = [
+    "児童ID",
+    "病気欠席数",
+    "事故欠席数",
+    "遅刻数",
+    "早退数",
+    "忌引等数",
+    "出席停止数",
+    "保健室利用数",
+    "心の天気晴れ数",
+    "心の天気曇り数",
+    "心の天気雨数",
+]
+
+DEFAULT_FEATURES = [
+    "病気欠席数",
+    "事故欠席数",
+    "遅刻数",
+    "早退数",
+    "保健室利用数",
+    "心の天気曇り率",
+    "心の天気雨率",
+    "心の天気晴れ率",
+]
+
+DEFAULT_OFF_FEATURES = {"忌引等数", "出席停止数"}
+LOW_IS_CONCERNING_DEFAULT = {"心の天気晴れ数", "心の天気晴れ率"}
+
+LABEL_ORDER_3 = ["低", "中", "高"]
+FLAG_ORDER = ["0", "1"]
+LABEL_COLORS = {"低": "#2E7D32", "中": "#ED6C02", "高": "#C62828", "0": "#2E7D32", "1": "#C62828"}
+
+
+st.set_page_config(
+    page_title="児童サポート必要度ラベリング デモ",
+    page_icon="🏫",
+    layout="wide",
+)
+
+
+@st.cache_data
+def load_data() -> pd.DataFrame:
+    """Load the bundled dummy data. No upload feature is intentionally provided."""
+    df = pd.read_csv(DATA_PATH, encoding="utf-8-sig")
+    missing = [c for c in RAW_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"必要なカラムが不足しています: {missing}")
+    return df[RAW_COLUMNS].copy()
+
+
+def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    total = out["心の天気晴れ数"] + out["心の天気曇り数"] + out["心の天気雨数"]
+    safe_total = total.replace(0, np.nan)
+
+    out["心の天気入力数"] = total
+    out["心の天気晴れ率"] = (out["心の天気晴れ数"] / safe_total * 100).fillna(0).round(1)
+    out["心の天気曇り率"] = (out["心の天気曇り数"] / safe_total * 100).fillna(0).round(1)
+    out["心の天気雨率"] = (out["心の天気雨数"] / safe_total * 100).fillna(0).round(1)
+
+    out["欠席合計（病気＋事故）"] = out["病気欠席数"] + out["事故欠席数"]
+    out["遅刻早退合計"] = out["遅刻数"] + out["早退数"]
+    out["除外候補合計（忌引等＋出席停止）"] = out["忌引等数"] + out["出席停止数"]
+    return out
+
+
+def minmax_to_100(series: pd.Series) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce").fillna(0)
+    min_v = float(s.min())
+    max_v = float(s.max())
+    if np.isclose(max_v, min_v):
+        return pd.Series(np.zeros(len(s)), index=s.index)
+    return (s - min_v) / (max_v - min_v) * 100
+
+
+def build_risk_matrix(
+    df: pd.DataFrame,
+    selected_features: List[str],
+    directions: Dict[str, str],
+) -> pd.DataFrame:
+    matrix = pd.DataFrame(index=df.index)
+    for feature in selected_features:
+        normalized = minmax_to_100(df[feature])
+        if directions.get(feature) == "低いほど気になる":
+            normalized = 100 - normalized
+        matrix[feature] = normalized.clip(0, 100)
+    return matrix
+
+
+def calculate_score(risk_matrix: pd.DataFrame, weights: Dict[str, int]) -> pd.Series:
+    if risk_matrix.empty:
+        return pd.Series(np.zeros(len(risk_matrix)), index=risk_matrix.index)
+
+    weight_values = np.array([weights.get(c, 1.0) for c in risk_matrix.columns], dtype=float)
+    weight_values = np.maximum(weight_values, 0)
+    if np.isclose(weight_values.sum(), 0):
+        weight_values = np.ones_like(weight_values)
+    weighted = risk_matrix.to_numpy(dtype=float) * weight_values
+    score = weighted.sum(axis=1) / weight_values.sum()
+    return pd.Series(score, index=risk_matrix.index).round(1)
+
+
+def label_three_levels(score: pd.Series, low_mid: int, mid_high: int) -> pd.Series:
+    return pd.Series(
+        np.select(
+            [score < low_mid, score < mid_high],
+            ["低", "中"],
+            default="高",
+        ),
+        index=score.index,
+    )
+
+
+def flag_binary(score: pd.Series, threshold: int) -> pd.Series:
+    return (score >= threshold).astype(int).astype(str)
+
+
+def summarize_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    summary = df[numeric_cols].agg(["count", "mean", "min", "max"]).T.reset_index()
+    summary.columns = ["変数", "件数", "平均", "最小", "最大"]
+    summary["欠損数"] = df[numeric_cols].isna().sum().values
+    summary["平均"] = summary["平均"].round(2)
+    return summary[["変数", "件数", "欠損数", "平均", "最小", "最大"]]
+
+
+def pca_coordinates(risk_matrix: pd.DataFrame) -> pd.DataFrame | None:
+    if not SKLEARN_AVAILABLE or risk_matrix.shape[1] < 2 or risk_matrix.shape[0] < 2:
+        return None
+    try:
+        pca = PCA(n_components=2, random_state=42)
+        coords = pca.fit_transform(risk_matrix.fillna(0).to_numpy(dtype=float))
+        return pd.DataFrame({"PCA1": coords[:, 0], "PCA2": coords[:, 1]}, index=risk_matrix.index)
+    except Exception:
+        return None
+
+
+def label_badge(label: str) -> str:
+    color = {
+        "低": "#E8F5E9",
+        "中": "#FFF3E0",
+        "高": "#FFEBEE",
+        "0": "#E8F5E9",
+        "1": "#FFEBEE",
+    }.get(label, "#F5F5F5")
+    text_color = {
+        "低": "#1B5E20",
+        "中": "#E65100",
+        "高": "#B71C1C",
+        "0": "#1B5E20",
+        "1": "#B71C1C",
+    }.get(label, "#111827")
+    display = {"0": "0：通常", "1": "1：要サポート候補"}.get(label, label)
+    return (
+        f"<span style='background:{color}; color:{text_color}; padding:6px 10px; "
+        f"border-radius:999px; font-weight:700;'>{display}</span>"
+    )
+
+
+raw_df = load_data()
+df = add_derived_features(raw_df)
+
+st.title("児童サポート必要度ラベリング デモ")
+st.caption(
+    "2026年4月1日〜4月30日、1クラス30名のテストデータを内蔵したStreamlitサンプルです。"
+    "CSVアップロード・CSV出力はありません。"
+)
+
+with st.expander("このアプリで行うこと", expanded=False):
+    st.markdown(
+        """
+- 文科省定義の不登校判定ではなく、**支援が必要そうな児童を見つけるためのサポート必要度ラベル**を付けます。
+- 複数の変数を選択し、変数ごとの向き・整数の重みを調整して、0〜100のサポート必要度スコアを作ります。
+- 同じスコアから、**低／中／高ラベル** と **0/1フラグ** の両方を作れます。
+- 心の天気は全児童が毎日入力する前提のため、晴れ率・曇り率・雨率を自動計算しています。
+        """
+    )
+
+numeric_features = [c for c in df.select_dtypes(include=[np.number]).columns if c != ID_COL]
+
+st.sidebar.header("ラベル設定")
+main_output = st.sidebar.radio(
+    "メイン表示",
+    ["低／中／高ラベル", "0/1フラグ"],
+    index=0,
+)
+
+threshold_low_mid, threshold_mid_high = st.sidebar.slider(
+    "低／中／高の境界",
+    min_value=0,
+    max_value=100,
+    value=(35, 70),
+    step=1,
+    help="スコアが低いほど『低』、高いほど『高』になります。",
+)
+flag_threshold = st.sidebar.slider(
+    "0/1フラグの境界",
+    min_value=0,
+    max_value=100,
+    value=70,
+    step=1,
+    help="この値以上の児童を 1：要サポート候補 とします。",
+)
+
+st.sidebar.header("使用変数")
+selected_features = st.sidebar.multiselect(
+    "スコアに使う変数",
+    options=numeric_features,
+    default=[c for c in DEFAULT_FEATURES if c in numeric_features],
+    help="忌引等数・出席停止数は初期設定では外していますが、必要に応じて追加できます。",
+)
+
+if not selected_features:
+    st.warning("スコアに使う変数を1つ以上選択してください。")
+    st.stop()
+
+st.sidebar.header("向き・重み")
+st.sidebar.caption("『低いほど気になる』を選ぶと、スコア計算時に値を反転します。重みは整数です。0はスコアに反映しない、1は標準、2以上は重視として扱います。")
+
+directions: Dict[str, str] = {}
+weights: Dict[str, int] = {}
+
+for feature in selected_features:
+    with st.sidebar.expander(feature, expanded=False):
+        default_direction = "低いほど気になる" if feature in LOW_IS_CONCERNING_DEFAULT else "高いほど気になる"
+        directions[feature] = st.radio(
+            "向き",
+            ["高いほど気になる", "低いほど気になる"],
+            index=0 if default_direction == "高いほど気になる" else 1,
+            key=f"direction_{feature}",
+            horizontal=False,
+        )
+        default_weight = 1
+        if feature in ["心の天気雨率", "心の天気雨数"]:
+            default_weight = 2
+        elif feature in DEFAULT_OFF_FEATURES:
+            default_weight = 0
+        weights[feature] = st.slider(
+            "重み（整数）",
+            min_value=0,
+            max_value=5,
+            value=int(default_weight),
+            step=1,
+            key=f"weight_{feature}",
+            help="0=スコアに反映しない、1=標準、2〜5=重視",
+        )
+
+risk_matrix = build_risk_matrix(df, selected_features, directions)
+score = calculate_score(risk_matrix, weights)
+three_label = label_three_levels(score, threshold_low_mid, threshold_mid_high)
+binary_flag = flag_binary(score, flag_threshold)
+
+result_df = df.copy()
+result_df.insert(1, "サポート必要度スコア", score)
+result_df.insert(2, "サポート必要度ラベル", three_label)
+result_df.insert(3, "0/1フラグ", binary_flag)
+result_df.insert(4, "0/1フラグ表示", result_df["0/1フラグ"].map({"0": "0：通常", "1": "1：要サポート候補"}))
+
+main_label_col = "サポート必要度ラベル" if main_output == "低／中／高ラベル" else "0/1フラグ"
+main_order = LABEL_ORDER_3 if main_label_col == "サポート必要度ラベル" else FLAG_ORDER
+
+summary_tab, result_tab, detail_tab, data_tab = st.tabs([
+    "結果サマリー",
+    "児童一覧",
+    "児童詳細",
+    "データ確認",
+])
+
+with summary_tab:
+    st.subheader("ラベル分布")
+    counts = result_df[main_label_col].value_counts().reindex(main_order, fill_value=0)
+    kpi_cols = st.columns(len(main_order))
+    for col, label in zip(kpi_cols, main_order):
+        display_label = {"0": "0：通常", "1": "1：要サポート候補"}.get(label, label)
+        col.metric(display_label, f"{int(counts[label])}名")
+
+    left, right = st.columns([1, 1])
+    with left:
+        plot_counts = counts.reset_index()
+        plot_counts.columns = ["ラベル", "人数"]
+        fig_bar = px.bar(
+            plot_counts,
+            x="ラベル",
+            y="人数",
+            text="人数",
+            color="ラベル",
+            color_discrete_map=LABEL_COLORS,
+            title="ラベル別人数",
+        )
+        fig_bar.update_layout(showlegend=False, yaxis_title="人数", xaxis_title="")
+        fig_bar.update_traces(textposition="outside", cliponaxis=False)
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with right:
+        fig_hist = px.histogram(
+            result_df,
+            x="サポート必要度スコア",
+            nbins=12,
+            color=main_label_col,
+            category_orders={main_label_col: main_order},
+            color_discrete_map=LABEL_COLORS,
+            title="サポート必要度スコア分布",
+        )
+        fig_hist.update_layout(yaxis_title="人数", xaxis_title="スコア")
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+    st.subheader("選択変数の2次元マップ")
+    coords = pca_coordinates(risk_matrix)
+    if coords is not None:
+        pca_df = pd.concat([result_df[[ID_COL, "サポート必要度スコア", main_label_col]], coords], axis=1)
+        fig_pca = px.scatter(
+            pca_df,
+            x="PCA1",
+            y="PCA2",
+            color=main_label_col,
+            size="サポート必要度スコア",
+            hover_data=[ID_COL, "サポート必要度スコア"],
+            category_orders={main_label_col: main_order},
+            color_discrete_map=LABEL_COLORS,
+            title="PCAによる参考可視化（ラベル判定にはスコアを使用）",
+        )
+        st.plotly_chart(fig_pca, use_container_width=True)
+    else:
+        fig_score = px.scatter(
+            result_df,
+            x="サポート必要度スコア",
+            y=ID_COL,
+            color=main_label_col,
+            hover_data=[ID_COL, "サポート必要度スコア"],
+            category_orders={main_label_col: main_order},
+            color_discrete_map=LABEL_COLORS,
+            title="スコア順の児童分布",
+        )
+        st.plotly_chart(fig_score, use_container_width=True)
+
+    st.info(
+        "PCAマップは、選択した複数変数を2次元に圧縮して見やすくするための参考表示です。"
+        "低／中／高や0/1の判定は、左メニューで設定した重み付きスコアと閾値から作成しています。"
+    )
+
+with result_tab:
+    st.subheader("児童ごとのラベル")
+    filter_options = ["すべて"] + main_order
+    selected_filter = st.selectbox("表示するラベル", filter_options)
+    table_df = result_df.copy()
+    if selected_filter != "すべて":
+        table_df = table_df[table_df[main_label_col] == selected_filter]
+
+    base_cols = [ID_COL, "サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ表示"]
+    display_cols = base_cols + [c for c in RAW_COLUMNS if c != ID_COL] + [
+        "心の天気晴れ率",
+        "心の天気曇り率",
+        "心の天気雨率",
+        "欠席合計（病気＋事故）",
+        "遅刻早退合計",
+    ]
+    display_cols = [c for c in display_cols if c in table_df.columns]
+
+    st.dataframe(
+        table_df.sort_values("サポート必要度スコア", ascending=False)[display_cols],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+with detail_tab:
+    st.subheader("児童別のスコア内訳")
+    selected_student = st.selectbox(
+        "児童IDを選択",
+        result_df.sort_values("サポート必要度スコア", ascending=False)[ID_COL].tolist(),
+    )
+    student_row = result_df[result_df[ID_COL] == selected_student].iloc[0]
+    student_idx = student_row.name
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("サポート必要度スコア", f"{student_row['サポート必要度スコア']:.1f}")
+    c2.markdown("**低／中／高ラベル**  ")
+    c2.markdown(label_badge(str(student_row["サポート必要度ラベル"])), unsafe_allow_html=True)
+    c3.markdown("**0/1フラグ**  ")
+    c3.markdown(label_badge(str(student_row["0/1フラグ"])), unsafe_allow_html=True)
+
+    contribution = pd.DataFrame({
+        "変数": selected_features,
+        "元の値": [student_row[f] for f in selected_features],
+        "向き": [directions[f] for f in selected_features],
+        "重み": [weights[f] for f in selected_features],
+        "リスク換算点": [risk_matrix.loc[student_idx, f] for f in selected_features],
+    })
+    total_weight = sum(max(weights[f], 0) for f in selected_features)
+    if np.isclose(total_weight, 0):
+        total_weight = len(selected_features)
+    contribution["スコア寄与"] = contribution.apply(
+        lambda r: r["リスク換算点"] * max(float(r["重み"]), 0) / total_weight,
+        axis=1,
+    ).round(1)
+    contribution = contribution.sort_values("スコア寄与", ascending=False)
+
+    fig_contrib = px.bar(
+        contribution,
+        x="スコア寄与",
+        y="変数",
+        orientation="h",
+        hover_data=["元の値", "向き", "重み", "リスク換算点"],
+        title=f"{selected_student} のスコア寄与",
+    )
+    fig_contrib.update_layout(yaxis={"categoryorder": "total ascending"}, xaxis_title="スコア寄与", yaxis_title="")
+    st.plotly_chart(fig_contrib, use_container_width=True)
+
+    st.markdown("**元データ・派生値**")
+    raw_view_cols = [c for c in RAW_COLUMNS if c != ID_COL] + [
+        "心の天気晴れ率",
+        "心の天気曇り率",
+        "心の天気雨率",
+        "欠席合計（病気＋事故）",
+        "遅刻早退合計",
+    ]
+    raw_view = student_row[raw_view_cols].to_frame("値")
+    st.dataframe(raw_view, use_container_width=True)
+
+with data_tab:
+    st.subheader("搭載データ")
+    st.caption("このアプリは内蔵CSVのみを使用します。アップロード機能はありません。")
+    st.dataframe(raw_df, use_container_width=True, hide_index=True)
+
+    st.subheader("変数の概要")
+    st.dataframe(summarize_numeric(df), use_container_width=True, hide_index=True)
+
+    st.subheader("初期設定の考え方")
+    st.markdown(
+        """
+| 変数 | 初期設定 |
+|---|---|
+| 病気欠席数・事故欠席数・遅刻数・早退数・保健室利用数 | 高いほど気になる |
+| 心の天気曇り率・心の天気雨率 | 高いほど気になる |
+| 心の天気晴れ率 | 低いほど気になる |
+| 忌引等数・出席停止数 | 初期設定では使用しない候補 |
+
+サポート必要度スコアは、各変数を0〜100点に正規化し、向きの反転と整数の重み付けを行ったうえで平均した値です。重み0の変数はスコアに反映されません。
+        """
+    )
