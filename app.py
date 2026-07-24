@@ -184,9 +184,23 @@ def summarize_main_factors(
     return risk_matrix.apply(row_factors, axis=1)
 
 
-def display_result_table(table_df: pd.DataFrame) -> None:
+def display_result_table(table_df: pd.DataFrame, highlight_columns: List[str] | None = None) -> None:
+    display_df = table_df.copy()
+    if highlight_columns:
+        style_map = {}
+        for col in highlight_columns:
+            if col in display_df.columns:
+                style_map[col] = "color: #1D4ED8; font-weight: 700; background-color: #E0F2FE;"
+        styled_df = display_df.style.apply_index(
+            lambda s: [style_map.get(col, "") for col in s],
+            axis=1,
+        )
+        data_to_render = styled_df
+    else:
+        data_to_render = display_df
+
     st.dataframe(
-        table_df,
+        data_to_render,
         column_config={
             "サポート必要度スコア": st.column_config.NumberColumn(format="%.1f"),
         },
@@ -409,20 +423,6 @@ df = add_derived_features(raw_df)
 
 st.title("要サポート児童ラベル付け")
 st.caption("2026年4月1日〜4月30日、5年3クラス90名のテストデータを内蔵しています。")
-st.info(
-    "サポート必要度スコアは、選択したカラムを比較基準ごとに0〜100へ換算し、整数重みを反映して集約した確認用の目安です。"
-    "比較基準を変更すると、同じ児童でもスコアやラベルが変わることがあります。"
-)
-
-with st.expander("このアプリで行うこと", expanded=False):
-    st.markdown(
-        """
-- 文科省定義の不登校判定ではなく、**支援が必要そうな児童を見つけるためのサポート必要度ラベル**を付けます。
-- 複数の変数を選択し、変数ごとの向き・整数の重みを調整して、0〜100のサポート必要度スコアを作ります。
-- 同じスコアから、**低／中／高ラベル** と **0/1フラグ** の両方を作れます。
-- 心の天気は全児童が毎日入力する前提のため、晴れ率・曇り率・雨率を自動計算しています。
-        """
-    )
 
 numeric_features = [c for c in df.select_dtypes(include=[np.number]).columns if c != ID_COL]
 
@@ -543,12 +543,25 @@ st.sidebar.download_button(
 )
 
 
-summary_tab, result_tab, data_tab, settings_tab = st.tabs([
+feature_tab, summary_tab, result_tab, data_tab, settings_tab = st.tabs([
+    "機能概要",
     "結果サマリー",
     "児童一覧",
     "元データ",
     "初期設定",
 ])
+
+with feature_tab:
+    st.subheader("機能概要")
+    st.markdown(
+        """
+- 文科省定義の不登校判定ではなく、**支援が必要そうな児童を見つけるためのサポート必要度ラベル**を付けます。
+- 複数の変数を選択し、変数ごとの向き・整数の重みを調整して、0〜100のサポート必要度スコアを作ります。
+- 同じスコアから、**低／中／高ラベル** と **0/1フラグ** の両方を作れます。
+- 心の天気は全児童が毎日入力する前提のため、晴れ率・曇り率・雨率を自動計算しています。
+- サポート必要度スコアは、選択したカラムを比較基準ごとに0〜100へ換算し、整数重みを反映して集約した確認用の目安です。比較基準を変更すると、同じ児童でもスコアやラベルが変わることがあります。
+        """
+    )
 
 with summary_tab:
     st.subheader("ラベル分布")
@@ -631,7 +644,10 @@ with summary_tab:
         "主な要因",
     ]
     priority_df = result_df.sort_values("サポート必要度スコア", ascending=False)[priority_cols].head(10)
-    display_result_table(priority_df)
+    display_result_table(
+        priority_df,
+        highlight_columns=["サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ"],
+    )
 
 with result_tab:
     st.subheader("児童ごとのラベル")
@@ -659,7 +675,10 @@ with result_tab:
     ]
     display_cols = [c for c in display_cols if c in table_df.columns]
 
-    display_result_table(table_df.sort_values("サポート必要度スコア", ascending=False)[display_cols])
+    display_result_table(
+        table_df.sort_values("サポート必要度スコア", ascending=False)[display_cols],
+        highlight_columns=["サポート必要度スコア", "サポート必要度ラベル", "0/1フラグ"],
+    )
 
 with data_tab:
     st.subheader("搭載データ")
