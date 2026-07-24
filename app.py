@@ -422,7 +422,9 @@ raw_df = load_data()
 df = add_derived_features(raw_df)
 
 st.title("要サポート児童ラベル付け")
-st.caption("2026年4月1日〜4月30日、5年3クラス90名のテストデータを内蔵しています。")
+
+st.header("機能概要")
+st.write("2026年4月1日〜4月30日、5年3クラス90名のテストデータを内蔵しています。")
 
 numeric_features = [c for c in df.select_dtypes(include=[np.number]).columns if c != ID_COL]
 
@@ -543,9 +545,9 @@ st.sidebar.download_button(
 )
 
 
-feature_tab, summary_tab, result_tab, data_tab, settings_tab = st.tabs([
-    "機能概要",
+summary_tab, feature_tab, result_tab, data_tab, settings_tab = st.tabs([
     "結果サマリー",
+    "機能概要",
     "児童一覧",
     "元データ",
     "初期設定",
