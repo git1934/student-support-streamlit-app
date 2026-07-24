@@ -298,7 +298,7 @@ def build_function_requirements_markdown(
 ## 1. ドキュメント情報
 
 - 出力日時：{generated_at}
-- アプリ名：要サポート児童ラベル付け
+- アプリ名：要サポート児童ラベル付け要件一覧出力アプリ
 - 出力形式：Markdown
 - 利用データ：`data/student_support_dummy_summary_30students_202604.csv`
 
