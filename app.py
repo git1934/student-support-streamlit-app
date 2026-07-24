@@ -217,6 +217,207 @@ def label_badge(label: str) -> str:
     )
 
 
+def build_function_requirements_markdown(
+    main_output: str,
+    threshold_low_mid: int,
+    threshold_mid_high: int,
+    flag_threshold: int,
+    comparison_basis: str,
+    selected_features: List[str],
+    directions: Dict[str, str],
+    weights: Dict[str, int],
+    raw_df: pd.DataFrame,
+    df: pd.DataFrame,
+    result_df: pd.DataFrame,
+    main_label_col: str,
+    main_order: List[str],
+) -> str:
+    """現在の設定値・利用データ・出力結果を含む機能要件書をMarkdown形式で生成する。"""
+
+    generated_at = pd.Timestamp.now(tz="Asia/Tokyo").strftime("%Y/%m/%d %H:%M")
+    data_start = "不明"
+    data_end = "不明"
+
+    # このサンプルデータは集計済みデータのため、日付列がない場合は画面仕様の対象期間を記載する。
+    if "日付" in raw_df.columns:
+        parsed_dates = pd.to_datetime(raw_df["日付"], errors="coerce").dropna()
+        if not parsed_dates.empty:
+            data_start = parsed_dates.min().strftime("%Y/%m/%d")
+            data_end = parsed_dates.max().strftime("%Y/%m/%d")
+    else:
+        data_start = "2026/04/01"
+        data_end = "2026/04/30"
+
+    feature_rows = []
+    for feature in selected_features:
+        feature_rows.append(
+            f"| {feature} | {directions.get(feature, '未設定')} | {weights.get(feature, 0)} |"
+        )
+    feature_table = "\n".join(feature_rows) or "| 選択なし | - | - |"
+
+    label_counts = result_df[main_label_col].value_counts().reindex(main_order, fill_value=0)
+    label_count_lines = "\n".join(
+        f"- {label}：{int(label_counts[label])}名" for label in main_order
+    )
+
+    top_priority = result_df.sort_values(
+        "サポート必要度スコア", ascending=False
+    )[[GRADE_COL, CLASS_COL, ID_COL, "サポート必要度スコア", main_label_col, "主な要因"]].head(10)
+
+    priority_rows = []
+    for _, row in top_priority.iterrows():
+        priority_rows.append(
+            f"| {row[GRADE_COL]} | {row[CLASS_COL]} | {row[ID_COL]} | "
+            f"{row['サポート必要度スコア']:.1f} | {row[main_label_col]} | {row['主な要因']} |"
+        )
+    priority_table = "\n".join(priority_rows)
+
+    numeric_summary = summarize_numeric(df)
+    summary_rows = []
+    for _, row in numeric_summary.iterrows():
+        summary_rows.append(
+            f"| {row['変数']} | {int(row['件数'])} | {int(row['欠損数'])} | "
+            f"{row['平均']} | {row['最小']} | {row['最大']} |"
+        )
+    numeric_summary_table = "\n".join(summary_rows)
+
+    if main_output == "低／中／高ラベル":
+        threshold_description = (
+            f"- 低：スコア {threshold_low_mid} 未満\n"
+            f"- 中：スコア {threshold_low_mid} 以上 {threshold_mid_high} 未満\n"
+            f"- 高：スコア {threshold_mid_high} 以上"
+        )
+    else:
+        threshold_description = (
+            f"- 0：スコア {flag_threshold} 未満\n"
+            f"- 1：スコア {flag_threshold} 以上"
+        )
+
+    return f"""# 児童サポート必要度ラベリング 機能要件書
+
+## 1. ドキュメント情報
+
+- 出力日時：{generated_at}
+- アプリ名：要サポート児童ラベル付け
+- 出力形式：Markdown
+- 利用データ：`data/student_support_dummy_summary_30students_202604.csv`
+
+## 2. 機能概要
+
+児童ごとの生活面データを使用し、支援が必要そうな児童を確認するための
+「サポート必要度スコア」とラベルを算出する。
+
+本機能は文部科学省定義の不登校判定を行うものではなく、
+教員や利用者が確認対象を絞り込むための補助的な目安として使用する。
+
+## 3. 現在の画面設定
+
+| 設定項目 | 設定値 |
+|---|---|
+| 分類手法 | {main_output} |
+| 比較基準 | {comparison_basis} |
+| 低・中の境界 | {threshold_low_mid} |
+| 中・高の境界 | {threshold_mid_high} |
+| 0/1フラグの境界 | {flag_threshold} |
+| 選択変数数 | {len(selected_features)} |
+| データ件数 | {len(raw_df)}件 |
+| 学年数 | {raw_df[GRADE_COL].nunique()} |
+| クラス数 | {raw_df[[GRADE_COL, CLASS_COL]].drop_duplicates().shape[0]} |
+| 対象期間 | {data_start} 〜 {data_end} |
+
+## 4. 選択変数・向き・重み
+
+| 変数 | スコア方向 | 重み |
+|---|---|---:|
+{feature_table}
+
+### 重みの意味
+
+- 0：スコアに反映しない
+- 1：標準
+- 2〜5：重視
+- 選択変数の重みがすべて0の場合は、計算継続のため全変数を重み1として扱う
+
+## 5. スコア計算要件
+
+1. 選択された変数だけをスコア計算に使用する。
+2. 比較基準が「クラス内比較」の場合は、学年・クラス単位で正規化する。
+3. 比較基準が「同学年内比較」の場合は、学年単位で正規化する。
+4. 各変数をグループ内で0〜100点にMin-Max正規化する。
+5. 「低いほど気になる」の変数は、正規化後に `100 - スコア` で反転する。
+6. 各変数の正規化スコアに整数重みを掛ける。
+7. 加重合計を重み合計で割り、0〜100のサポート必要度スコアを算出する。
+8. 最終スコアは小数第1位に丸める。
+9. 主な要因は、各変数の正規化スコア×重みの寄与度が高い順に最大3件表示する。
+
+## 6. ラベル判定要件
+
+現在選択されている分類手法：**{main_output}**
+
+{threshold_description}
+
+## 7. 現在の出力結果
+
+### 7.1 ラベル分布
+
+{label_count_lines}
+
+### 7.2 サポート優先上位10名
+
+| 学年 | クラス | 児童ID | スコア | ラベル | 主な要因 |
+|---|---|---|---:|---|---|
+{priority_table}
+
+## 8. 利用データ要件
+
+### 必須列
+
+- 学年
+- クラス
+- 児童ID
+- 病気欠席数
+- 事故欠席数
+- 遅刻数
+- 早退数
+- 忌引等数
+- 出席停止数
+- 保健室利用数
+- 心の天気晴れ数
+- 心の天気曇り数
+- 心の天気雨数
+
+### 自動生成する派生変数
+
+- 心の天気入力数
+- 心の天気晴れ率
+- 心の天気曇り率
+- 心の天気雨率
+- 欠席合計（病気＋事故）
+- 遅刻早退合計
+
+### 利用データ概要
+
+| 変数 | 件数 | 欠損数 | 平均 | 最小 | 最大 |
+|---|---:|---:|---:|---:|---:|
+{numeric_summary_table}
+
+## 9. 画面要件
+
+- 左側サイドバーに分類手法、閾値、比較基準、使用変数、向き、重みを表示する。
+- 結果サマリーでは、ラベル分布、スコア分布、クラス別分布、優先一覧を表示する。
+- 児童一覧では、選択したラベルで絞り込みできる。
+- 元データタブでは、内蔵データと変数概要を確認できる。
+- 初期設定タブでは、変数の方向と重み付けの考え方を表示する。
+- 「機能要件一覧を出力する」ボタンで、このMarkdownファイルをダウンロードできる。
+
+## 10. 注意事項
+
+- 本スコアとラベルは、支援の必要性を確定する判定ではない。
+- 比較対象となる集団や選択変数、方向、重み、閾値によって結果は変化する。
+- 出力結果は、教員や利用者による確認・判断を補助する目的で使用する。
+"""
+
+
 raw_df = load_data()
 df = add_derived_features(raw_df)
 
@@ -328,6 +529,33 @@ result_df.insert(5, "主な要因", main_factors)
 
 main_label_col = "サポート必要度ラベル" if main_output == "低／中／高ラベル" else "0/1フラグ"
 main_order = LABEL_ORDER_3 if main_label_col == "サポート必要度ラベル" else FLAG_ORDER
+
+requirements_markdown = build_function_requirements_markdown(
+    main_output=main_output,
+    threshold_low_mid=threshold_low_mid,
+    threshold_mid_high=threshold_mid_high,
+    flag_threshold=flag_threshold,
+    comparison_basis=comparison_basis,
+    selected_features=selected_features,
+    directions=directions,
+    weights=weights,
+    raw_df=raw_df,
+    df=df,
+    result_df=result_df,
+    main_label_col=main_label_col,
+    main_order=main_order,
+)
+
+st.sidebar.markdown("---")
+st.sidebar.header("機能要件")
+st.sidebar.download_button(
+    label="機能要件一覧を出力する",
+    data=requirements_markdown,
+    file_name="student_support_function_requirements.md",
+    mime="text/markdown",
+    use_container_width=True,
+)
+
 
 summary_tab, result_tab, data_tab, settings_tab = st.tabs([
     "結果サマリー",
