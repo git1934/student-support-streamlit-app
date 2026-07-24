@@ -293,7 +293,7 @@ def build_function_requirements_markdown(
             f"- 1：スコア {flag_threshold} 以上"
         )
 
-    return f"""# 児童サポート必要度ラベリング 機能要件書
+    return f"""# 児童サポート必要度ラベリング 機能要件一覧
 
 ## 1. ドキュメント情報
 
